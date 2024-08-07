@@ -1,9 +1,11 @@
 package csvscan
 
 import (
+	"crypto/rand"
 	"encoding/csv"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"strings"
 
@@ -102,4 +104,20 @@ func psqlToBQDataType(datatype, val string) string {
 		}
 	}
 	return val
+}
+
+// MakeExportCSVFileName will add a random number to avoid collisions
+// due to GCS retention policy preventing overwriting existing files
+func MakeExportCSVFileName(tableName string) (string, error) {
+	nBig, err := rand.Int(rand.Reader, big.NewInt(1000))
+	if err != nil {
+		return "", errors.Wrap(err, "Unable to generate random number")
+	}
+	extension := ".csv"
+	return fmt.Sprintf(
+		"%s_%d%s",
+		tableName,
+		nBig,
+		extension,
+	), nil
 }

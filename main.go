@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/StevenACoffman/psqltobq/pkg/ds"
-	"github.com/StevenACoffman/psqltobq/pkg/gcpapi"
 	"io"
 	"log"
 	"math/rand"
@@ -23,15 +21,17 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/StevenACoffman/anotherr/errors"
-
 	"github.com/StevenACoffman/psqltobq/pkg/bq"
 	"github.com/StevenACoffman/psqltobq/pkg/csvscan"
+	"github.com/StevenACoffman/psqltobq/pkg/ds"
+	"github.com/StevenACoffman/psqltobq/pkg/gcpapi"
 	"github.com/StevenACoffman/psqltobq/pkg/gcs"
 	"github.com/StevenACoffman/psqltobq/pkg/psql"
 )
 
 func main() {
 }
+
 func Incremental(logger *zap.Logger) error {
 	isTerminal := false
 	if isatty.IsTerminal(os.Stdout.Fd()) {
@@ -82,7 +82,7 @@ func Incremental(logger *zap.Logger) error {
 		tunnel := sshtunnel.NewSSHTunnel(
 			// User and host of tunnel server, it will default to port 22
 			// if not specified.
-			"steve@"+getEnv("SSH_BASTION_HOST", ""), //redacted
+			"steve@"+getEnv("SSH_BASTION_HOST", ""), // redacted
 			sshtunnel.PrivateKeyFile(sshFilePath),
 
 			// The destination host and port of the actual server.
@@ -170,7 +170,7 @@ func processSingleTable(
 	info := ds.ImportTableInfo{
 		TableName:    tableName,
 		BQProject:    bqProject,
-		GCSFolder:    "tincremental",
+		GCSFolder:    "incremental",
 		GCSBucket:    "ephemeral.khanacademy.org",
 		FinalDataset: "reports_postgres_exported",
 	}
@@ -200,6 +200,7 @@ func processSingleTable(
 
 	err = gcs.UploadFile(
 		ctx,
+		logger,
 		gcsClient,
 		&info,
 	)
@@ -231,7 +232,7 @@ func getPSQLInfo(
 		info.TempTableName,
 	)
 	// TODO(steve): we want to change this from TempDataset to FinalDataset when releasing
-	info.FQBQTempDataSetDestTable = fmt.Sprintf(
+	info.FQBQFinalDataSetDestTable = fmt.Sprintf(
 		"`%s`.%s.%s",
 		info.BQProject,
 		info.TempDataset, // info.FinalDataset,
@@ -300,8 +301,8 @@ func setupTunnel(logger *zap.Logger) (*sshtunnel.SSHTunnel, error) {
 		sshtunnel.PrivateKeyFile(sshFilePath),
 
 		// The destination host and port of the actual server.
-		"10.7.97.196:5432", // main-production-cluster
-
+		//"10.7.97.196:5432", // main-production-cluster
+		"10.7.97.219:5432", // main-production-read
 		// The local port you want to bind the remote port to.
 		// Specifying "0" will lead to a random port.
 		"0",
@@ -337,7 +338,13 @@ func exporter(
 
 	// will read + write rows as we pipe them in
 	go func() {
-		csvErr := csvscan.CSVScanner(logger, pipeReader, fileCsv, info.PSQLColumnTypes, &info.CSVHeaders)
+		csvErr := csvscan.CSVScanner(
+			logger,
+			pipeReader,
+			fileCsv,
+			info.PSQLColumnTypes,
+			&info.CSVHeaders,
+		)
 		if csvErr != nil {
 			logger.Error("CSV Scanner got error", zap.Error(csvErr))
 		}

@@ -1,8 +1,9 @@
 package gcpapi
 
 import (
-	"cloud.google.com/go/storage"
 	"context"
+
+	"cloud.google.com/go/storage"
 	"google.golang.org/api/option"
 
 	"github.com/StevenACoffman/anotherr/errors"

@@ -3,7 +3,6 @@ package bq
 import (
 	"context"
 	"fmt"
-	"github.com/StevenACoffman/psqltobq/pkg/ds"
 	"strings"
 	"time"
 
@@ -12,23 +11,85 @@ import (
 	"google.golang.org/api/iterator"
 
 	"github.com/StevenACoffman/anotherr/errors"
+	"github.com/StevenACoffman/psqltobq/pkg/ds"
 )
 
-func GetLast(
+func MakeAndPerformMerge(
 	ctx context.Context,
+	logger *zap.Logger,
 	client *bigquery.Client,
-	dataset string,
-	tableName string,
-) ([][]bigquery.Value, error) {
-	q := `SELECT ` +
-		`FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S',
-		CAST(MAX(last_updated) AS TIMESTAMP))
-	AS max_date
-	FROM ` + "`khanacademy.org:deductive-jet-827`" + "." + dataset + "." + tableName + ";"
-	return performBigQuery(ctx, client, q)
+	info *ds.ImportTableInfo,
+) error {
+	err := importCSVAutodetectSchemaToTempBQTable(
+		ctx,
+		client,
+		"ephemeral.khanacademy.org",
+		info,
+	)
+	if err != nil {
+		return errors.Wrap(err, "Unable to import CSV into BQ")
+	}
+
+	mergeQuery, err := createMergeQuery(ctx, client, info)
+	if err != nil {
+		return errors.Wrap(err, "Unable to create merge query for BQ")
+	}
+
+	logger.Info(
+		fmt.Sprint(
+			"Source Table:"+info.FQBQTempTableName,
+			"Primary Keys:",
+			strings.Join(info.PKs, ","),
+		),
+	)
+	logger.Info(mergeQuery)
+
+	// run the merge
+	_, err = performBigQuery(ctx, client, mergeQuery)
+	if err != nil {
+		return errors.Wrap(err, "Unable to perform MergeQuery")
+	}
+	return nil
 }
 
-func GetColumnTypes(
+func GetLastModifiedForTable(
+	ctx context.Context,
+	client *bigquery.Client,
+	info *ds.ImportTableInfo,
+) error {
+	rows, err := createQueryAndRunGetLastModified(ctx, client, info.FinalDataset, info.TableName)
+	if err != nil {
+		return errors.Wrap(
+			err,
+			"Unable to createQueryAndRunGetLastModified for table "+info.TableName,
+		)
+	}
+	if len(rows) == 0 || len(rows[0]) == 0 {
+		return errors.New("No Get LastModified Date")
+	}
+
+	info.LastUpdatedStr = fmt.Sprint(rows[0][0])
+	if info.LastUpdatedStr == "" || info.LastUpdatedStr == "<nil>" {
+		info.LastUpdatedStr = "2000-01-02 15:04:05"
+		info.LastUpdated = time.Date(2000, 1, 2, 15, 0o4, 0o5, 0, time.UTC)
+		info.LastUpdatedTSStr = info.LastUpdated.Format("20060102_1504")
+		return nil
+	}
+
+	layout := "2006-01-02 15:04:05"
+	info.LastUpdated, err = time.Parse(layout, info.LastUpdatedStr)
+	if err != nil {
+		return errors.Wrap(
+			err,
+			"Unable to parse date "+info.LastUpdatedStr,
+		)
+	}
+
+	info.LastUpdatedTSStr = info.LastUpdated.Format("20060102_1504")
+	return nil
+}
+
+func getBQColumnTypes(
 	ctx context.Context,
 	client *bigquery.Client,
 	dataset string,
@@ -80,7 +141,11 @@ func performBigQuery(
 	}
 }
 
-func ImportCSVAutodetectSchema(
+// importCSVAutodetectSchemaToTempBQTable will import the exported
+// PostgreSQL/AlloyDB data CSV into a temporary Big Query Table
+// The BigQuery Table will have a schema constructed by translating
+// the PostgreSQL DDL into BigQuery DDL (columns only)
+func importCSVAutodetectSchemaToTempBQTable(
 	ctx context.Context,
 	client *bigquery.Client,
 	bucket string,
@@ -112,13 +177,17 @@ func ImportCSVAutodetectSchema(
 	}
 	gcsRef.SkipLeadingRows = 1
 
+	// This is where the writing to BigQuery is setup
 	loader := client.Dataset(info.TempDataset).Table(info.TempTableName).LoaderFrom(gcsRef)
 	loader.WriteDisposition = bigquery.WriteTruncate
 
+	// This is where the writing to BigQuery is actually initiated
 	job, err := loader.Run(ctx)
 	if err != nil {
 		return errors.Wrap(err, "BQ CSV loader Run failed")
 	}
+
+	// This is where we wait until it is complete
 	status, err := job.Wait(ctx)
 	if err != nil {
 		return errors.Wrap(err, "BQ CSV Load Wait failed")
@@ -130,82 +199,47 @@ func ImportCSVAutodetectSchema(
 	return nil
 }
 
-func GetLastModifiedForTable(
+func createQueryAndRunGetLastModified(
 	ctx context.Context,
 	client *bigquery.Client,
-	info *ds.ImportTableInfo,
-) error {
-	rows, err := GetLast(ctx, client, info.FinalDataset, info.TableName)
-	if err != nil {
-		return errors.Wrap(
-			err,
-			"Unable to GetLast for table "+info.TableName,
-		)
-	}
-	if len(rows) == 0 || len(rows[0]) == 0 {
-		return errors.New("No Get LastModified Date")
-	}
-
-	info.LastUpdatedStr = fmt.Sprint(rows[0][0])
-	if info.LastUpdatedStr == "" {
-		return errors.New("table had empty lastupdated string")
-	}
-
-	layout := "2006-01-02 15:04:05"
-	info.LastUpdated, err = time.Parse(layout, info.LastUpdatedStr)
-	if err != nil {
-		return errors.Wrap(
-			err,
-			"Unable to parse date "+info.LastUpdatedStr,
-		)
-	}
-
-	info.LastUpdatedTSStr = info.LastUpdated.Format("20060102_1504")
-	return nil
+	dataset string,
+	tableName string,
+) ([][]bigquery.Value, error) {
+	q := `SELECT ` +
+		`FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S',
+		CAST(MAX(last_updated) AS TIMESTAMP))
+	AS max_date
+	FROM ` + "`khanacademy.org:deductive-jet-827`" + "." + dataset + "." + tableName + ";"
+	return performBigQuery(ctx, client, q)
 }
 
-func MakeAndPerformMerge(
+// createMergeQuery is exactly equivalent to existing Python sql_export and constructs
+// identical MERGE SQL (except python INSERT ROW is here INSERT (...) VALUES (...) )
+// for added safety in case column order differs
+func createMergeQuery(
 	ctx context.Context,
-	logger *zap.Logger,
 	client *bigquery.Client,
 	info *ds.ImportTableInfo,
-) error {
-	err := ImportCSVAutodetectSchema(
+) (string, error) {
+	var err error
+	// BigQuery newly created daily temp table we just uploaded CSV to
+	info.SourceColumnTypes, err = getBQColumnTypes(
 		ctx,
 		client,
-		"ephemeral.khanacademy.org",
-		info,
+		info.TempDataset,
+		info.TempTableName,
 	)
 	if err != nil {
-		return errors.Wrap(err, "Unable to import CSV into BQ")
+		return "", errors.Wrap(err, "Unable to get BQ Column Types for Temp BQ table")
 	}
 
-	info.TargetColumnTypes, err = GetColumnTypes(ctx, client, info.TempDataset, info.TableName)
+	// BigQuery final existing destination table we will MERGE INTO
+	info.TargetColumnTypes, err = getBQColumnTypes(ctx, client, info.TempDataset, info.TableName)
 	if err != nil {
-		return errors.Wrap(err, "Unable to get BQ Column Types for Final Destination")
+		return "", errors.Wrap(err, "Unable to get BQ Column Types for Final Destination")
 	}
 
-	info.SourceColumnTypes, err = GetColumnTypes(ctx, client, info.TempDataset, info.TempTableName)
-	if err != nil {
-		return errors.Wrap(err, "Unable to get BQ Column Types for Temp BQ table")
-	}
-	logger.Info(
-		fmt.Sprint(
-			"Source Table:"+info.FQBQTempTableName,
-			"Primary Keys:",
-			strings.Join(info.PKs, ","),
-		),
-	)
-	mergeQuery := CreateMergeQuery(info)
-	logger.Info(mergeQuery)
-	_, err = performBigQuery(ctx, client, mergeQuery)
-	if err != nil {
-		return errors.Wrap(err, "Unable to perform MergeQuery")
-	}
-	return nil
-}
-
-func CreateMergeQuery(info *ds.ImportTableInfo) string {
+	// All columns that are not Primary Keys so we can update them in merge
 	nonPks := setSubstraction(info.ColNames, info.PKs)
 	var valCols []string
 	for _, v := range nonPks {
@@ -228,8 +262,14 @@ func CreateMergeQuery(info *ds.ImportTableInfo) string {
 				        WHEN MATCHED AND S.last_updated >= '%s' THEN
 				            UPDATE SET %s
 				        WHEN NOT MATCHED THEN
-				            %s;`, info.FQBQTempDataSetDestTable, info.FQBQTempTableName, joinColsStr, info.LastUpdatedStr, strings.Join(valCols, ",\n"), createInsert(info.ColNames))
-	return mergeQuery
+				            %s;`,
+		info.FQBQFinalDataSetDestTable,
+		info.FQBQTempTableName,
+		joinColsStr,
+		info.LastUpdatedStr,
+		strings.Join(valCols, ",\n"),
+		createInsert(info.ColNames))
+	return mergeQuery, nil
 }
 
 func setSubstraction(superset, subset []string) []string {
@@ -262,7 +302,7 @@ func setSubstraction(superset, subset []string) []string {
 func createInsert(colNames []string) string {
 	var sourceCols []string
 	for _, v := range colNames {
-		sourceCols = append(sourceCols, fmt.Sprintf("S.%s", v))
+		sourceCols = append(sourceCols, "S."+v)
 	}
 	return fmt.Sprintf(
 		`INSERT (%s) VALUES (%s)`,

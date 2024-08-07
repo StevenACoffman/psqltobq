@@ -3,40 +3,42 @@ package gcs
 import (
 	"context"
 	"fmt"
-	"github.com/StevenACoffman/psqltobq/pkg/ds"
 	"io"
 	"os"
 	"path/filepath"
-	"time"
 
 	"cloud.google.com/go/storage"
+	"go.uber.org/zap"
 
 	"github.com/StevenACoffman/anotherr/errors"
+	"github.com/StevenACoffman/psqltobq/pkg/ds"
 )
 
 // UploadFile uploads an object given the full src file path
-func UploadFile(ctx context.Context, gcsClient *storage.Client, info *ds.ImportTableInfo) error {
-	ctx, cancel := context.WithTimeout(ctx, time.Second*180)
-	defer cancel()
-
+func UploadFile(ctx context.Context, logger *zap.Logger, gcsClient *storage.Client, info *ds.ImportTableInfo) error {
 	info.ObjectName = fmt.Sprintf(
 		"%s/%s/%s",
 		info.GCSFolder,
 		info.LastUpdatedTSStr,
 		info.LocalFileName,
 	)
+	logger.Info("Uploading to GCS " + info.GCSBucket + "/" + info.ObjectName)
+
 	o := gcsClient.Bucket(info.GCSBucket).Object(info.ObjectName)
-	sourceFileStat, err := os.Stat(info.LocalFileName)
+	sourceFileStat, err := os.Stat(info.LocalFullFilePath)
 	if err != nil {
-		return errors.Wrap(err, "Unable to stat file "+info.LocalFileName)
+		return errors.Wrap(err, "Unable to stat file "+info.LocalFullFilePath)
 	}
 
 	if !sourceFileStat.Mode().IsRegular() {
 		return fmt.Errorf("%s is not a regular file", info.LocalFileName)
 	}
-	source, err := os.Open(info.LocalFileName)
+	defer func() {
+		_ = os.Remove(info.LocalFullFilePath)
+	}()
+	source, err := os.Open(info.LocalFullFilePath)
 	if err != nil {
-		return errors.Wrap(err, "Unable to open file "+info.LocalFileName)
+		return errors.Wrap(err, "Unable to open file "+info.LocalFullFilePath)
 	}
 	defer func(source *os.File) {
 		_ = source.Close()
@@ -45,7 +47,7 @@ func UploadFile(ctx context.Context, gcsClient *storage.Client, info *ds.ImportT
 	// Upload an object with storage.Writer.
 	wc := o.NewWriter(ctx)
 	if _, err = io.Copy(wc, source); err != nil {
-		return errors.Wrap(err, "Unable to io.Copy file "+info.LocalFileName)
+		return errors.Wrap(err, "Unable to io.Copy file "+info.LocalFullFilePath)
 	}
 
 	if err = wc.Close(); err != nil {
