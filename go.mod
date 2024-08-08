@@ -10,6 +10,8 @@ require (
 	github.com/jackc/pgconn v1.14.0
 	github.com/jackc/pgx/v4 v4.18.1
 	github.com/mattn/go-isatty v0.0.17
+	github.com/tommy351/zap-stackdriver v0.1.4
+	go.uber.org/automaxprocs v1.5.3
 	go.uber.org/zap v1.24.0
 	google.golang.org/api v0.114.0
 )
